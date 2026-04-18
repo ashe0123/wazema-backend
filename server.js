@@ -79,6 +79,12 @@ app.use(rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
   skip: (req) => req.path === '/api/health',
+  // ✅ FIX: prevents ERR_ERL_UNEXPECTED_X_FORWARDED_FOR crash on Render
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return forwarded.split(',')[0].trim();
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+  },
 }));
 
 // ── BODY PARSING (strict limits) ──────────────────────────────────────────
@@ -141,12 +147,24 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Please wait 15 minutes.' },
+  // ✅ FIX: same safe key extraction for auth limiter
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return forwarded.split(',')[0].trim();
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+  },
 });
 
 const sensitiveOpLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
   max: isDev ? 500 : 30,
   message: { error: 'Too many sensitive operations. Please wait.' },
+  // ✅ FIX: same safe key extraction
+  keyGenerator: (req) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) return forwarded.split(',')[0].trim();
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+  },
 });
 
 app.use('/api/auth',       authLimiter,           require('./routes/auth'));

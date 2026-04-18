@@ -50,10 +50,9 @@ router.post('/login', async (req, res) => {
 
     // ── ADMIN LOGIN ──────────────────────────────────────────────────────
     if (role === 'admin') {
-      const admin = await db.one(
-        'SELECT * FROM admins WHERE username=$1',
-        [id]
-      );
+      // ✅ FIX: db.one() throws if no row found — catch it and treat as null
+      let admin = null;
+      try { admin = await db.one('SELECT * FROM admins WHERE username=$1', [id]); } catch {}
 
       if (!admin || !bcrypt.compareSync(password, admin.password)) {
         recordFailedLogin(id);
@@ -78,25 +77,17 @@ router.post('/login', async (req, res) => {
     let member = null;
 
     // Try exact ID match
-    member = await db.one(
-      "SELECT * FROM members WHERE id=$1",
-      [id]
-    );
+    // ✅ FIX: wrap each db.one() — returns null if not found instead of throwing
+    try { member = await db.one("SELECT * FROM members WHERE id=$1", [id]); } catch {}
 
     // If not found by ID, try phone
     if (!member && normalizedPhone) {
-      member = await db.one(
-        "SELECT * FROM members WHERE phone=$1",
-        [normalizedPhone]
-      );
+      try { member = await db.one("SELECT * FROM members WHERE phone=$1", [normalizedPhone]); } catch {}
     }
 
     // Also try raw phone if normalization failed (e.g. user typed with spaces)
     if (!member) {
-      member = await db.one(
-        "SELECT * FROM members WHERE phone=$1",
-        [id]
-      );
+      try { member = await db.one("SELECT * FROM members WHERE phone=$1", [id]); } catch {}
     }
 
     if (!member || !bcrypt.compareSync(password, member.password)) {
@@ -154,9 +145,10 @@ router.post('/change-password', authMiddleware, async (req, res) => {
 
     let user;
     if (role === 'admin') {
-      user = await db.one('SELECT * FROM admins WHERE id=$1', [id]);
+      // ✅ FIX: safe fallback
+      try { user = await db.one('SELECT * FROM admins WHERE id=$1', [id]); } catch {}
     } else {
-      user = await db.one('SELECT * FROM members WHERE id=$1', [id]);
+      try { user = await db.one('SELECT * FROM members WHERE id=$1', [id]); } catch {}
     }
 
     if (!user || !bcrypt.compareSync(current_password, user.password)) {
@@ -191,9 +183,11 @@ router.post('/forgot-password', async (req, res) => {
     const id = identifier.trim();
     const normalizedPhone = normalizePhone(id);
 
-    let member = await db.one('SELECT id, phone FROM members WHERE id=$1', [id]);
+    let member = null;
+    // ✅ FIX: safe fallback
+    try { member = await db.one('SELECT id, phone FROM members WHERE id=$1', [id]); } catch {}
     if (!member && normalizedPhone) {
-      member = await db.one('SELECT id, phone FROM members WHERE phone=$1', [normalizedPhone]);
+      try { member = await db.one('SELECT id, phone FROM members WHERE phone=$1', [normalizedPhone]); } catch {}
     }
 
     // Always return same response to prevent user enumeration
