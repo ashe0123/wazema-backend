@@ -50,9 +50,13 @@ router.post('/login', async (req, res) => {
 
     // ── ADMIN LOGIN ──────────────────────────────────────────────────────
     if (role === 'admin') {
-      // ✅ FIX: db.one() throws if no row found — catch it and treat as null
-      let admin = null;
-      try { admin = await db.one('SELECT * FROM admins WHERE username=$1', [id]); } catch {}
+      let adminResult = null;
+      try {
+        adminResult = await db.query('SELECT * FROM admins WHERE username=$1', [id]);
+      } catch (err) {
+        console.error(err);
+      }
+      const admin = adminResult?.rows?.[0] || null;
 
       if (!admin || !bcrypt.compareSync(password, admin.password)) {
         recordFailedLogin(id);
@@ -77,17 +81,25 @@ router.post('/login', async (req, res) => {
     let member = null;
 
     // Try exact ID match
-    // ✅ FIX: wrap each db.one() — returns null if not found instead of throwing
-    try { member = await db.one("SELECT * FROM members WHERE id=$1", [id]); } catch {}
+    try {
+      const r = await db.query("SELECT * FROM members WHERE id=$1", [id]);
+      member = r.rows?.[0] || null;
+    } catch (err) { console.error(err); }
 
     // If not found by ID, try phone
     if (!member && normalizedPhone) {
-      try { member = await db.one("SELECT * FROM members WHERE phone=$1", [normalizedPhone]); } catch {}
+      try {
+        const r = await db.query("SELECT * FROM members WHERE phone=$1", [normalizedPhone]);
+        member = r.rows?.[0] || null;
+      } catch (err) { console.error(err); }
     }
 
     // Also try raw phone if normalization failed (e.g. user typed with spaces)
     if (!member) {
-      try { member = await db.one("SELECT * FROM members WHERE phone=$1", [id]); } catch {}
+      try {
+        const r = await db.query("SELECT * FROM members WHERE phone=$1", [id]);
+        member = r.rows?.[0] || null;
+      } catch (err) { console.error(err); }
     }
 
     if (!member || !bcrypt.compareSync(password, member.password)) {
@@ -124,7 +136,8 @@ router.post('/logout', authMiddleware, (req, res) => {
   try {
     revokeToken(req.token);
     res.json({ message: 'Logged out successfully' });
-  } catch {
+  } catch (err) {
+    console.error(err);
     res.json({ message: 'Logged out' });
   }
 });
@@ -145,10 +158,15 @@ router.post('/change-password', authMiddleware, async (req, res) => {
 
     let user;
     if (role === 'admin') {
-      // ✅ FIX: safe fallback
-      try { user = await db.one('SELECT * FROM admins WHERE id=$1', [id]); } catch {}
+      try {
+        const r = await db.query('SELECT * FROM admins WHERE id=$1', [id]);
+        user = r.rows?.[0] || null;
+      } catch (err) { console.error(err); }
     } else {
-      try { user = await db.one('SELECT * FROM members WHERE id=$1', [id]); } catch {}
+      try {
+        const r = await db.query('SELECT * FROM members WHERE id=$1', [id]);
+        user = r.rows?.[0] || null;
+      } catch (err) { console.error(err); }
     }
 
     if (!user || !bcrypt.compareSync(current_password, user.password)) {
@@ -184,10 +202,15 @@ router.post('/forgot-password', async (req, res) => {
     const normalizedPhone = normalizePhone(id);
 
     let member = null;
-    // ✅ FIX: safe fallback
-    try { member = await db.one('SELECT id, phone FROM members WHERE id=$1', [id]); } catch {}
+    try {
+      const r = await db.query('SELECT id, phone FROM members WHERE id=$1', [id]);
+      member = r.rows?.[0] || null;
+    } catch (err) { console.error(err); }
     if (!member && normalizedPhone) {
-      try { member = await db.one('SELECT id, phone FROM members WHERE phone=$1', [normalizedPhone]); } catch {}
+      try {
+        const r = await db.query('SELECT id, phone FROM members WHERE phone=$1', [normalizedPhone]);
+        member = r.rows?.[0] || null;
+      } catch (err) { console.error(err); }
     }
 
     // Always return same response to prevent user enumeration
