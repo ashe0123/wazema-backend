@@ -11,6 +11,10 @@ const app   = express();
 const PORT  = process.env.PORT || 3002;
 const isDev = process.env.NODE_ENV !== 'production';
 
+// ── TRUST PROXY (required for Render/Railway/any reverse proxy) ───────────
+// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+app.set('trust proxy', 1);
+
 // ── ENFORCE STRONG JWT SECRET ─────────────────────────────────────────────
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
   if (!isDev) {
