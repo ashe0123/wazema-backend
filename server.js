@@ -25,21 +25,25 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
 }
 
 // ── SECURITY HEADERS ──────────────────────────────────────────────────────
+// ⚠️  Issue 4 fix: remove 'unsafe-inline' from scriptSrc in production.
+// Next.js frontend handles its own CSP — this is API-only, no inline scripts needed.
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
-      defaultSrc:     ["'self'"],
-      scriptSrc:      ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      styleSrc:       ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://fonts.gstatic.com'],
-      fontSrc:        ["'self'", 'https://fonts.gstatic.com'],
-      imgSrc:         ["'self'", 'data:', 'blob:'],
-      connectSrc:     ["'self'"],
-      frameSrc:       ["'none'"],
-      objectSrc:      ["'none'"],
+      defaultSrc:  ["'self'"],
+      scriptSrc:   isDev
+        ? ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com']
+        : ["'self'"],                          // no unsafe-inline in production
+      styleSrc:    ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://fonts.gstatic.com'],
+      fontSrc:     ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc:      ["'self'", 'data:', 'blob:'],
+      connectSrc:  ["'self'"],
+      frameSrc:    ["'none'"],
+      objectSrc:   ["'none'"],
       upgradeInsecureRequests: isDev ? [] : [],
     },
   },
-  crossOriginEmbedderPolicy: false, // needed for PDF inline view
+  crossOriginEmbedderPolicy: false,
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   permissionsPolicy: {
     features: {
@@ -51,9 +55,11 @@ app.use(helmet({
 }));
 
 // ── CORS ──────────────────────────────────────────────────────────────────
+// ⚠️  Issue 2 fix: if CORS_ORIGIN is missing in production, block all
+// cross-origin requests instead of falling back to wildcard true.
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-  : (isDev ? true : false); // dev: allow all; prod without CORS_ORIGIN: block all cross-origin
+  : (isDev ? true : []); // dev: allow all; prod without CORS_ORIGIN: block all
 
 app.use(cors({
   origin: allowedOrigins,
@@ -71,20 +77,26 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── SHARED KEY GENERATOR (safe for Render / reverse proxies) ─────────────
+// Extracts the real client IP from X-Forwarded-For without crashing.
+// Used by ALL rate limiters so behaviour is consistent.
+function rateLimitKey(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) return forwarded.split(',')[0].trim();
+  return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
 // ── GLOBAL RATE LIMITING ──────────────────────────────────────────────────
+// ⚠️  Issue 1 fix: global limiter skips /api/auth so the tighter authLimiter
+// below is the ONLY limiter that counts login attempts — no double-counting.
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isDev ? 2000 : 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
-  skip: (req) => req.path === '/api/health',
-  // ✅ FIX: prevents ERR_ERL_UNEXPECTED_X_FORWARDED_FOR crash on Render
-  keyGenerator: (req) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) return forwarded.split(',')[0].trim();
-    return req.ip || req.socket?.remoteAddress || 'unknown';
-  },
+  skip: (req) => req.path === '/api/health' || req.path.startsWith('/api/auth'),
+  keyGenerator: rateLimitKey,
 }));
 
 // ── BODY PARSING (strict limits) ──────────────────────────────────────────
@@ -143,28 +155,18 @@ app.use('/uploads', (req, res, next) => {
 // ── API ROUTES ────────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: isDev ? 500 : 10,  // 10 login attempts per 15 min in production
+  max: isDev ? 500 : 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts. Please wait 15 minutes.' },
-  // ✅ FIX: same safe key extraction for auth limiter
-  keyGenerator: (req) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) return forwarded.split(',')[0].trim();
-    return req.ip || req.socket?.remoteAddress || 'unknown';
-  },
+  keyGenerator: rateLimitKey,
 });
 
 const sensitiveOpLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
+  windowMs: 60 * 60 * 1000,
   max: isDev ? 500 : 30,
   message: { error: 'Too many sensitive operations. Please wait.' },
-  // ✅ FIX: same safe key extraction
-  keyGenerator: (req) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    if (forwarded) return forwarded.split(',')[0].trim();
-    return req.ip || req.socket?.remoteAddress || 'unknown';
-  },
+  keyGenerator: rateLimitKey,
 });
 
 app.use('/api/auth',       authLimiter,           require('./routes/auth'));
