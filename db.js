@@ -18,7 +18,9 @@ if (process.env.DATABASE_URL) {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1')
       ? false : { rejectUnauthorized: false },
-    max: 10,
+    max: 3,              // Neon free tier: max 5 connections — keep it low
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
   });
 
   // Convert SQLite-style ? placeholders → $1, $2 ...
@@ -106,7 +108,10 @@ if (process.env.DATABASE_URL) {
   };
 
   // Initialize schema then seed admin + settings
-  initPgSchema().then(() => seedPg()).catch(e => console.error('PG init error:', e.message));
+  // Small delay lets the pool stabilize before running many queries
+  setTimeout(() => {
+    initPgSchema().then(() => seedPg()).catch(e => console.error('PG init error:', e.message));
+  }, 2000);
 
   async function initPgSchema() {
     await db.exec(`
