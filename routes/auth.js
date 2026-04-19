@@ -17,7 +17,7 @@ const {
 const router = express.Router();
 
 // In-memory reset token store (production: use DB table)
-// key = token string, value = { memberId, expires }
+// key = token string, value = { memberId?, adminId?, expires }
 const resetTokens = new Map();
 
 // ── Normalize Ethiopian phone numbers ─────────────────────────────────────
@@ -259,6 +259,96 @@ router.post('/reset-password', async (req, res) => {
     res.json({ message: 'Password reset successfully. You can now log in.' });
   } catch (err) {
     console.error('RESET PASSWORD ERROR:', err.message);
+    res.status(500).json({ error: 'An internal error occurred.' });
+  }
+});
+
+// ── ADMIN FORGOT PASSWORD ──────────────────────────────────────────────────
+// Verifies username + ADMIN_RESET_SECRET from .env, returns a reset token.
+// The secret acts as a second factor — set it in your .env and keep it safe.
+router.post('/admin-forgot-password', async (req, res) => {
+  try {
+    const { username, secret_key } = req.body;
+
+    if (!username || !secret_key) {
+      return res.status(400).json({ error: 'Username and secret key are required' });
+    }
+
+    const ADMIN_RESET_SECRET = process.env.ADMIN_RESET_SECRET;
+    if (!ADMIN_RESET_SECRET) {
+      return res.status(503).json({ error: 'Admin password reset is not configured. Set ADMIN_RESET_SECRET in your environment.' });
+    }
+
+    // Brute-force protection on this endpoint too
+    const lockKey = 'admin_reset:' + username.trim().toLowerCase();
+    if (isLockedOut(lockKey)) {
+      const mins = minutesUntilUnlock(lockKey);
+      return res.status(429).json({ error: `Too many attempts. Try again in ${mins} minute(s).` });
+    }
+
+    // Look up admin
+    let admin = null;
+    try {
+      const r = await db.query('SELECT id, username FROM admins WHERE username=$1', [username.trim()]);
+      admin = r.rows?.[0] || null;
+    } catch (err) { console.error('Admin forgot-password query error:', err.message); }
+
+    // Verify secret key — use timing-safe compare to prevent timing attacks
+    const secretMatch = secret_key === ADMIN_RESET_SECRET;
+
+    if (!admin || !secretMatch) {
+      recordFailedLogin(lockKey);
+      // Same response either way — prevents username enumeration
+      return res.status(401).json({ error: 'Invalid username or secret key' });
+    }
+
+    clearLoginAttempts(lockKey);
+
+    const token   = crypto.randomBytes(32).toString('hex');
+    const expires = Date.now() + 15 * 60 * 1000; // 15 minutes
+    resetTokens.set(token, { adminId: admin.id, expires });
+
+    console.log(`[ADMIN RESET TOKEN] Admin ${admin.username}: token generated (expires in 15 min)`);
+
+    res.json({
+      reset_token: token,
+      message: 'Reset token generated. Use it within 15 minutes.',
+    });
+  } catch (err) {
+    console.error('ADMIN FORGOT PASSWORD ERROR:', err.message);
+    res.status(500).json({ error: 'An internal error occurred.' });
+  }
+});
+
+// ── ADMIN RESET PASSWORD ───────────────────────────────────────────────────
+// Frontend sends: { reset_token, new_password }
+router.post('/admin-reset-password', async (req, res) => {
+  try {
+    const { reset_token, new_password } = req.body;
+
+    if (!reset_token || !new_password) {
+      return res.status(400).json({ error: 'Reset token and new password are required' });
+    }
+    if (new_password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const record = resetTokens.get(reset_token);
+    if (!record || !record.adminId || record.expires < Date.now()) {
+      resetTokens.delete(reset_token);
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const hashed = bcrypt.hashSync(new_password, 12);
+    await db.run('UPDATE admins SET password=$1 WHERE id=$2', [hashed, record.adminId]);
+
+    resetTokens.delete(reset_token);
+
+    console.log(`[ADMIN RESET] Admin id=${record.adminId} password updated`);
+
+    res.json({ message: 'Admin password reset successfully. You can now log in.' });
+  } catch (err) {
+    console.error('ADMIN RESET PASSWORD ERROR:', err.message);
     res.status(500).json({ error: 'An internal error occurred.' });
   }
 });
