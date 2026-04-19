@@ -18,9 +18,16 @@ if (process.env.DATABASE_URL) {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1')
       ? false : { rejectUnauthorized: false },
-    max: 3,              // Neon free tier: max 5 connections — keep it low
+    max: 3,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000,
+  });
+
+  // Test connection immediately on startup
+  pool.query('SELECT 1').then(() => {
+    console.log('✅ PostgreSQL connected successfully');
+  }).catch(e => {
+    console.error('❌ PostgreSQL connection FAILED:', e.message);
   });
 
   // Convert SQLite-style ? placeholders → $1, $2 ...
