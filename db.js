@@ -67,6 +67,7 @@ if (process.env.DATABASE_URL) {
 
   db = {
     _type: 'pg',
+    query,  // expose raw query for routes that need it
     async one(sql, params = [])  { const r = await query(sql, params); return r.rows[0] || null; },
     async all(sql, params = [])  { const r = await query(sql, params); return r.rows; },
     async run(sql, params = [])  {
