@@ -16,16 +16,18 @@ const {
 
 const router = express.Router();
 
-// In-memory map for password reset tokens (production: use DB table)
+// In-memory reset token store (production: use DB table)
+// key = token string, value = { memberId, expires }
 const resetTokens = new Map();
 
 // ── Normalize Ethiopian phone numbers ─────────────────────────────────────
-// Accepts: 09XXXXXXXX (10 digits starting with 09)
+// Accepts: 09XXXXXXXX or +2519XXXXXXXX or 2519XXXXXXXX
 function normalizePhone(raw) {
   if (!raw) return null;
   const digits = raw.replace(/\D/g, '');
-  // Must be exactly 10 digits starting with 09
-  if (/^09\d{8}$/.test(digits)) return digits;
+  // +251 or 251 prefix → convert to 09...
+  if (/^2519\d{8}$/.test(digits)) return '0' + digits.slice(3);
+  if (/^09\d{8}$/.test(digits))   return digits;
   return null;
 }
 
@@ -50,13 +52,13 @@ router.post('/login', async (req, res) => {
 
     // ── ADMIN LOGIN ──────────────────────────────────────────────────────
     if (role === 'admin') {
-      let adminResult = null;
+      let admin = null;
       try {
-        adminResult = await db.query('SELECT * FROM admins WHERE username=$1', [id]);
+        const r = await db.query('SELECT * FROM admins WHERE username=$1', [id]);
+        admin = r.rows?.[0] || null;
       } catch (err) {
-        console.error(err);
+        console.error('Admin query error:', err.message);
       }
-      const admin = adminResult?.rows?.[0] || null;
 
       if (!admin || !bcrypt.compareSync(password, admin.password)) {
         recordFailedLogin(id);
@@ -76,42 +78,41 @@ router.post('/login', async (req, res) => {
     }
 
     // ── MEMBER LOGIN ─────────────────────────────────────────────────────
-    // Try by member ID first, then by phone (normalized)
     const normalizedPhone = normalizePhone(id);
     let member = null;
 
-    // Try exact ID match
+    // 1. Try exact member ID match
     try {
-      const r = await db.query("SELECT * FROM members WHERE id=$1", [id]);
+      const r = await db.query('SELECT * FROM members WHERE id=$1', [id]);
       member = r.rows?.[0] || null;
-    } catch (err) { console.error(err); }
+    } catch (err) { console.error('Member ID query error:', err.message); }
 
-    // If not found by ID, try phone
+    // 2. Try normalized phone
     if (!member && normalizedPhone) {
       try {
-        const r = await db.query("SELECT * FROM members WHERE phone=$1", [normalizedPhone]);
+        const r = await db.query('SELECT * FROM members WHERE phone=$1', [normalizedPhone]);
         member = r.rows?.[0] || null;
-      } catch (err) { console.error(err); }
+      } catch (err) { console.error('Member phone query error:', err.message); }
     }
 
-    // Also try raw phone if normalization failed (e.g. user typed with spaces)
-    if (!member) {
+    // 3. Try raw phone as fallback
+    if (!member && id !== normalizedPhone) {
       try {
-        const r = await db.query("SELECT * FROM members WHERE phone=$1", [id]);
+        const r = await db.query('SELECT * FROM members WHERE phone=$1', [id]);
         member = r.rows?.[0] || null;
-      } catch (err) { console.error(err); }
+      } catch (err) { console.error('Member raw phone query error:', err.message); }
+    }
+
+    // Check status BEFORE password (don't waste bcrypt on inactive accounts)
+    if (member && member.status && member.status !== 'active') {
+      return res.status(403).json({
+        error: 'Your account is not active. Please contact the administrator.',
+      });
     }
 
     if (!member || !bcrypt.compareSync(password, member.password)) {
       recordFailedLogin(id);
       return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
-    // Block inactive/exited members
-    if (member.status && member.status !== 'active') {
-      return res.status(403).json({
-        error: 'Your account is not active. Please contact the administrator.',
-      });
     }
 
     clearLoginAttempts(id);
@@ -137,7 +138,7 @@ router.post('/logout', authMiddleware, (req, res) => {
     revokeToken(req.token);
     res.json({ message: 'Logged out successfully' });
   } catch (err) {
-    console.error(err);
+    console.error('Logout error:', err.message);
     res.json({ message: 'Logged out' });
   }
 });
@@ -156,30 +157,20 @@ router.post('/change-password', authMiddleware, async (req, res) => {
 
     const { id, role } = req.user;
 
-    let user;
-    if (role === 'admin') {
-      try {
-        const r = await db.query('SELECT * FROM admins WHERE id=$1', [id]);
-        user = r.rows?.[0] || null;
-      } catch (err) { console.error(err); }
-    } else {
-      try {
-        const r = await db.query('SELECT * FROM members WHERE id=$1', [id]);
-        user = r.rows?.[0] || null;
-      } catch (err) { console.error(err); }
-    }
+    let user = null;
+    try {
+      const table = role === 'admin' ? 'admins' : 'members';
+      const r = await db.query(`SELECT * FROM ${table} WHERE id=$1`, [id]);
+      user = r.rows?.[0] || null;
+    } catch (err) { console.error('Change password query error:', err.message); }
 
     if (!user || !bcrypt.compareSync(current_password, user.password)) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
 
     const hashed = bcrypt.hashSync(new_password, 12);
-
-    if (role === 'admin') {
-      await db.run('UPDATE admins SET password=$1 WHERE id=$2', [hashed, id]);
-    } else {
-      await db.run('UPDATE members SET password=$1 WHERE id=$2', [hashed, id]);
-    }
+    const table  = role === 'admin' ? 'admins' : 'members';
+    await db.run(`UPDATE ${table} SET password=$1 WHERE id=$2`, [hashed, id]);
 
     // Revoke current token — user must log in again
     revokeToken(req.token);
@@ -191,41 +182,50 @@ router.post('/change-password', authMiddleware, async (req, res) => {
   }
 });
 
-// ── FORGOT PASSWORD (admin-only reset flow) ────────────────────────────────
-// In production, send this token via SMS/email. Here we return it for admin use.
+// ── FORGOT PASSWORD ────────────────────────────────────────────────────────
+// Frontend sends: { member_id, phone }
+// Verifies member exists AND phone matches, then returns reset_token directly
+// (admin delivers it to the member in person / via phone call)
 router.post('/forgot-password', async (req, res) => {
   try {
-    const { identifier } = req.body;
-    if (!identifier) return res.status(400).json({ error: 'Identifier required' });
+    const { member_id, phone } = req.body;
 
-    const id = identifier.trim();
-    const normalizedPhone = normalizePhone(id);
+    if (!member_id || !phone) {
+      return res.status(400).json({ error: 'Member ID and phone number are required' });
+    }
 
+    const id             = member_id.trim().toUpperCase();
+    const normalizedPhone = normalizePhone(phone.trim());
+
+    if (!normalizedPhone) {
+      return res.status(400).json({ error: 'Invalid phone number format. Use 09XXXXXXXX.' });
+    }
+
+    // Look up member by ID
     let member = null;
     try {
       const r = await db.query('SELECT id, phone FROM members WHERE id=$1', [id]);
       member = r.rows?.[0] || null;
-    } catch (err) { console.error(err); }
-    if (!member && normalizedPhone) {
-      try {
-        const r = await db.query('SELECT id, phone FROM members WHERE phone=$1', [normalizedPhone]);
-        member = r.rows?.[0] || null;
-      } catch (err) { console.error(err); }
-    }
+    } catch (err) { console.error('Forgot password query error:', err.message); }
 
-    // Always return same response to prevent user enumeration
-    if (!member) {
-      return res.json({ message: 'If the account exists, a reset token has been generated. Contact your administrator.' });
+    // Verify phone matches — prevents token generation for wrong person
+    const memberPhone = member ? normalizePhone(member.phone) : null;
+    if (!member || memberPhone !== normalizedPhone) {
+      // Same response either way — prevents user enumeration
+      return res.json({ message: 'If the details match our records, a reset token has been generated. Contact your administrator.' });
     }
 
     const token   = crypto.randomBytes(32).toString('hex');
     const expires = Date.now() + 30 * 60 * 1000; // 30 minutes
     resetTokens.set(token, { memberId: member.id, expires });
 
-    // In production: send via SMS/email. For now, admin delivers it manually.
     console.log(`[RESET TOKEN] Member ${member.id}: ${token} (expires in 30 min)`);
 
-    res.json({ message: 'Reset token generated. Contact your administrator to receive it.' });
+    // Return token directly so admin can relay it to the member
+    res.json({
+      reset_token: token,
+      message: 'Reset token generated. Your administrator will provide it to you.',
+    });
   } catch (err) {
     console.error('FORGOT PASSWORD ERROR:', err.message);
     res.status(500).json({ error: 'An internal error occurred.' });
@@ -233,27 +233,28 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 // ── RESET PASSWORD ─────────────────────────────────────────────────────────
+// Frontend sends: { reset_token, new_password }
 router.post('/reset-password', async (req, res) => {
   try {
-    const { token, new_password } = req.body;
+    const { reset_token, new_password } = req.body;
 
-    if (!token || !new_password) {
-      return res.status(400).json({ error: 'Token and new password are required' });
+    if (!reset_token || !new_password) {
+      return res.status(400).json({ error: 'Reset token and new password are required' });
     }
     if (new_password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
 
-    const record = resetTokens.get(token);
+    const record = resetTokens.get(reset_token);
     if (!record || record.expires < Date.now()) {
-      resetTokens.delete(token);
+      resetTokens.delete(reset_token);
       return res.status(400).json({ error: 'Invalid or expired reset token' });
     }
 
     const hashed = bcrypt.hashSync(new_password, 12);
     await db.run('UPDATE members SET password=$1 WHERE id=$2', [hashed, record.memberId]);
 
-    resetTokens.delete(token);
+    resetTokens.delete(reset_token);
 
     res.json({ message: 'Password reset successfully. You can now log in.' });
   } catch (err) {
