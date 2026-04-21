@@ -176,6 +176,7 @@ app.use('/api/loans',                             require('./routes/loans'));
 app.use('/api/repayments',                        require('./routes/repayments'));
 app.use('/api/uploads',    sensitiveOpLimiter,    require('./routes/uploads'));
 app.use('/api/settings',                          require('./routes/settings'));
+app.use('/api/receipts',                          require('./routes/receipts'));
 
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
