@@ -237,6 +237,47 @@ router.patch('/:id/confirm', authMiddleware, adminOnly, async (req, res, next) =
   } catch(e) { next(e); }
 });
 
+// POST /api/savings/bulk-confirm — bulk approve multiple savings
+router.post('/bulk-confirm', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const { ids, status } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array is required' });
+    }
+    if (ids.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
+    }
+    const finalStatus = ['paid', 'late'].includes(status) ? status : 'paid';
+    const results = [];
+    
+    for (const id of ids) {
+      try {
+        const row = await db.one('SELECT * FROM savings WHERE id=$1', [id]);
+        if (!row) {
+          results.push({ id, status: 'not_found' });
+          continue;
+        }
+        if (row.status !== 'pending_review') {
+          results.push({ id, status: 'already_processed', current_status: row.status });
+          continue;
+        }
+        await db.run('UPDATE savings SET status=$1 WHERE id=$2', [finalStatus, id]);
+        results.push({ id, status: 'confirmed', new_status: finalStatus });
+      } catch (err) {
+        results.push({ id, status: 'error', error: err.message });
+      }
+    }
+    
+    const confirmed = results.filter(r => r.status === 'confirmed').length;
+    res.json({ 
+      message: `Confirmed ${confirmed} of ${ids.length} payment(s)`, 
+      confirmed,
+      total: ids.length,
+      results 
+    });
+  } catch(e) { next(e); }
+});
+
 // PATCH /api/savings/:id/waive-penalty
 router.patch('/:id/waive-penalty', authMiddleware, adminOnly, async (req, res, next) => {
   try {

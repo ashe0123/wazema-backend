@@ -236,6 +236,65 @@ router.patch('/:id/confirm', authMiddleware, adminOnly, async (req, res, next) =
   } catch(e) { next(e); }
 });
 
+// POST /api/repayments/bulk-confirm — bulk approve multiple repayments
+router.post('/bulk-confirm', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'ids array is required' });
+    }
+    if (ids.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 records per bulk operation' });
+    }
+    
+    const results = [];
+    const processedLoans = new Set();
+    
+    for (const id of ids) {
+      try {
+        const rep = await db.one('SELECT r.*,l.id as loan_id FROM repayments r JOIN loans l ON r.loan_id=l.id WHERE r.id=$1', [id]);
+        if (!rep) {
+          results.push({ id, status: 'not_found' });
+          continue;
+        }
+        if (rep.status !== 'pending_review') {
+          results.push({ id, status: 'already_processed', current_status: rep.status });
+          continue;
+        }
+        
+        await db.run("UPDATE repayments SET status='paid' WHERE id=$1", [id]);
+        processedLoans.add(rep.loan_id);
+        results.push({ id, status: 'confirmed', loan_id: rep.loan_id });
+      } catch (err) {
+        results.push({ id, status: 'error', error: err.message });
+      }
+    }
+    
+    // Advance queue and check completion for all affected loans
+    for (const loanId of processedLoans) {
+      try {
+        await advanceQueue(loanId);
+        // Check if loan is now complete
+        const unpaid = await db.all("SELECT id FROM repayments WHERE loan_id=$1 AND status NOT IN ('paid','refinanced')", [loanId]);
+        if (unpaid.length === 0) {
+          await db.run("UPDATE loans SET status='completed' WHERE id=$1", [loanId]);
+        }
+      } catch (err) {
+        console.error(`Error processing loan ${loanId}:`, err.message);
+      }
+    }
+    
+    const confirmed = results.filter(r => r.status === 'confirmed').length;
+    res.json({ 
+      message: `Confirmed ${confirmed} of ${ids.length} repayment(s)`, 
+      confirmed,
+      total: ids.length,
+      loans_affected: processedLoans.size,
+      results 
+    });
+  } catch(e) { next(e); }
+});
+
 // PATCH /api/repayments/:id/waive-penalty
 router.patch('/:id/waive-penalty', authMiddleware, adminOnly, async (req, res, next) => {
   try {
