@@ -1,0 +1,43 @@
+# Environment variables (NEVER commit)
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+wazema_replica.db
+
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pm2-*.log
+
+# Uploads
+uploads/*
+!uploads/.gitkeep
+
+# Backups
+backups/
+*.sql
+*.sql.enc
+*.backup
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# PM2
+.pm2/
